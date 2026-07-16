@@ -23,12 +23,13 @@ final class ClosetScannerUITests: XCTestCase {
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testLaunchesIntoScannerSetup() throws {
         let app = XCUIApplication()
         app.launch()
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+        XCTAssertTrue(app.staticTexts["Closet Scanner"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Does the closet have a soffit?"].exists)
+        XCTAssertFalse(app.staticTexts["Hello, world!"].exists)
     }
 
     @MainActor

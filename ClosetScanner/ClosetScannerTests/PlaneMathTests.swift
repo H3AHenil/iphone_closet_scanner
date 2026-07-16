@@ -36,6 +36,18 @@ private func syntheticPlane(normal: SIMD3<Double>, throughPoint p: SIMD3<Double>
 
 struct PlaneMathTests {
 
+    @Test func captureOrderReflectsSoffitChoice() {
+        #expect(SurfaceLabel.captureOrder(hasSoffit: true) == [
+            .soffitBottom, .soffitFace,
+            .doorLeftJamb, .doorRightJamb, .doorHead,
+            .leftWall, .rightWall, .backWall, .frontWall, .floor, .ceiling,
+        ])
+        #expect(SurfaceLabel.captureOrder(hasSoffit: false) == [
+            .doorLeftJamb, .doorRightJamb, .doorHead,
+            .leftWall, .rightWall, .backWall, .frontWall, .floor, .ceiling,
+        ])
+    }
+
     @Test func eigenRecoversDiagonal() {
         let m = simd_double3x3(diagonal: SIMD3(3, 1, 2))
         let (values, vectors) = eigenSymmetric3(m)

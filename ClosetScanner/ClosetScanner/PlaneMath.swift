@@ -81,6 +81,21 @@ enum SurfaceLabel: String, CaseIterable, Identifiable {
         default: true
         }
     }
+
+    var phase: String {
+        switch self {
+        case .soffitBottom, .soffitFace: "Soffit"
+        case .doorLeftJamb, .doorRightJamb, .doorHead: "Door · from outside"
+        default: "Closet interior"
+        }
+    }
+
+    /// Capture sequence: soffit (if any) → door from outside → interior.
+    static func captureOrder(hasSoffit: Bool) -> [SurfaceLabel] {
+        (hasSoffit ? [.soffitBottom, .soffitFace] : [])
+            + [.doorLeftJamb, .doorRightJamb, .doorHead]
+            + coreOrder
+    }
 }
 
 // MARK: - Plane fit

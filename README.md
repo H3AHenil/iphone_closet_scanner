@@ -1,76 +1,54 @@
 # ClosetScanner
 
-iPhone (17 Pro Max, LiDAR) app that scans a reach-in closet, digitally empties it on screen, and reports its dimensions to the nearest 1/16″ with a stated uncertainty.
+An iPhone app that measures reach-in closets with the LiDAR sensor. Each surface is captured as a plane fitted to tens of thousands of depth samples, and dimensions are computed as plane-to-plane distances — so a cluttered closet measures correctly even when its corners and edges are hidden behind cabinets or boxes. Once the interior is captured, the app draws the closet empty: an opaque, clean-rendered shell over the live camera feed, plus a rotatable 3D model.
 
-## How to use it
+Built with SwiftUI, ARKit, and RealityKit. No third-party dependencies. Requires an iPhone with LiDAR (Pro models).
 
-1. Open the app — camera starts immediately. Toggle the **torch** if the closet is dark (tracking needs light; LiDAR doesn't).
-2. Aim the dashed reticle at a **bare patch** of each surface (chips along the bottom: Left → Right → Back → Front → Floor → Ceiling, auto-advancing) and tap **Capture**. Hold still ~1 second per surface. Boxes and cabinets are fine — just aim at any visible patch of the wall itself; edges and corners are never needed.
-3. After the six core surfaces: the closet **renders empty** — an opaque clean shell drawn at the fitted planes covers everything inside — with W × D × H painted on the back wall and a live measurement card on screen.
-4. Optional chips: **soffit underside + soffit face** (adds under-soffit height and soffit depth, and draws the soffit block in the shell), and **door jambs + head** captured from outside (door width/height) — only aimed surfaces are ever captured, so the rest of the room stays out of the scan.
-5. Tap any measurement row to **calibrate**: enter the tape-measured true value (e.g. `27 3/16`) and a scale correction is applied to everything and persisted.
+## Using the app
 
-## Architecture
+1. The start screen asks whether the closet has a soffit. That sets the capture order: soffit → door → interior.
+2. For each step, aim the on-screen reticle at a bare patch of the named surface and tap capture, holding still for about a second. Any visible patch works; the app never needs to see an edge or corner.
+3. The door is captured from outside — both jambs and the head. Only what's inside the reticle is ever sampled, so the rest of the room stays out of the scan.
+4. After the six interior surfaces (left, right, back, front, floor, ceiling), the closet renders empty with W/D/H drawn on the back wall. "3D view" opens an orbitable model of the empty space.
+5. Tap any measurement to calibrate: enter the tape-measured value and a scale correction is applied to all measurements and persisted.
+
+A torch button is in the top bar — closets are dark, and while LiDAR doesn't need light, camera tracking does.
+
+## How it works
+
+Each capture accumulates the central window of the LiDAR depth map over 40 frames, keeping only high-confidence pixels, and unprojects them through the camera intrinsics into world space — typically 50–150k points. A plane is fitted in two passes: trimmed least squares (the worst 25% of residuals dropped), then re-admission of every point within a MAD-based band around the trimmed fit. This keeps a hanger or box edge clipping the window from dragging the plane. The fit reports its residual σ and inlier fraction, and the app warns when a capture looks cluttered, uneven, or has the wrong orientation for the surface it's supposed to be.
+
+A dimension is the symmetrized mean distance between the sample points of one plane and the fitted plane of its opposite. The wall-to-wall angle is checked and shown when the pair is more than 1.5° out of parallel. Corners for the rendered shell come from three-plane intersections; the shell quads are textured procedurally and drawn without occlusion, which is what makes the real contents disappear.
+
+Every capture also raycasts against ARKit's independent plane detection. Each measurement row shows the difference between the two estimators as a built-in cross-check.
+
+I tried Apple RoomPlan first (that attempt is on `main`). It's designed for whole rooms, needs more standoff distance than a 24-inch-deep closet allows, loses walls behind clutter, and models the entire bedroom when you scan the door from outside. The plane-fitting approach replaced it.
+
+## Accuracy
+
+With ~10⁵ samples per surface, averaging pushes the statistical error well under a millimeter; what remains is systematic. The dominant term is ARKit's world-scale error, typically 0.3–0.5% of the span — about 1/8″ across a closet. The calibration step exists for exactly this: one tape-measured reference brings the scale term down to roughly 0.15%, which is 1/16″ territory on typical closet spans. Every measurement displays its own ± (standard error combined with the scale term, floored at 1/32″) rather than implying more precision than the sensor supports.
+
+## Validation
+
+- Unit tests cover the geometry: synthetic walls with 4 mm of noise recover a known 0.686 m gap to under 1 mm, and a simulated box covering a quarter of the sampling window does not move the fitted plane.
+- Tape-measure protocol: calibrate on one dimension, then compare the remaining dimensions against tape. Held-out checks, not fitting to the answer.
+- Repeatability: rescan the same closet several times and compare the spread against the displayed ±.
+- Method agreement: the ARKit cross-check on each row is a second, independent detector; the two agreeing is evidence neither is broken.
+
+## Limitations
+
+- The 1/16″ target needs the calibration step; uncalibrated, world-scale drift caps accuracy around 1/8″ on typical spans.
+- Mirrors and glossy paint corrupt LiDAR returns — aim at matte patches.
+- Real walls are not perfectly plumb or parallel. The app reports the mean gap over the sampled patches and flags the angle; where you sample is part of what "the" width means.
+- Door height needs the floor plane, which is captured in the interior phase, so it appears late in the flow.
+
+## Building and testing
+
+Open `ClosetScanner/ClosetScanner.xcodeproj` in Xcode, select an iPhone with LiDAR, and run. Camera permission is already configured.
 
 ```
-ARKit (world tracking + LiDAR smoothedSceneDepth, plane detection for cross-check)
-   │  40 frames × central depth window, confidence == .high only
-   ▼
-Unprojection (scaled intrinsics → world points, ~50–150k pts per capture)
-   ▼
-Robust plane fit (PlaneMath.swift — pure Swift, unit-tested)
-   │  trimmed least squares (drop worst 25%) → MAD re-admission → final fit
-   │  covariance smallest-eigenvector via 3×3 Jacobi; σ, inlier %, warnings
-   ▼
-Measurements = plane-to-plane gaps (symmetrized mean point→plane distance)
-   │  × persisted calibration factor; ± = SE ⊕ scale error; parallelism angle
-   ▼
-RealityKit overlay: opaque clean shell + soffit block + dimension text
-SwiftUI HUD: reticle, chips, capture ring, measurement card, calibration
+xcodebuild -project ClosetScanner/ClosetScanner.xcodeproj -scheme ClosetScanner \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' test
 ```
 
-Three files: `PlaneMath.swift` (geometry, no ARKit — fully testable), `CaptureController.swift` (session + overlay), `ScanView.swift` (UI).
-
-## Why this method (alternatives considered)
-
-| Method | Verdict |
-|---|---|
-| **Apple RoomPlan** (tried first, on `main`) | Built for whole rooms ≥ ~2×2 m; unreliable in a 24″-deep reach-in, walls get eaten by clutter, ~±2 cm at best, and it happily models the rest of the room when you scan the door — the opposite of the brief. |
-| **Tap-to-measure raycasts** | Two single raycasts = two noisy samples (~±5–10 mm each) and you must hit the true edge, which is exactly what cabinets/boxes hide. |
-| **Depth-window plane fitting** (chosen) | Averages tens of thousands of LiDAR samples per surface → mm-level plane locations; a plane extends infinitely, so obstructed edges/corners don't matter; dimensions are plane-to-plane gaps; soffits and jambs are just more planes; nothing outside the reticle is ever captured. |
-| Cross-check kept in-app | Every capture also raycasts ARKit's independent plane-anchor estimate; each measurement row shows the Δ between the two detectors (✓ when within 1/8″). |
-
-## Accuracy: budget, calibration, validation
-
-**Error budget per dimension** (~60–100 cm spans):
-
-| Source | Magnitude | Mitigation |
-|---|---|---|
-| LiDAR per-pixel depth noise | ±5–15 mm | Averaged over ~10⁵ high-confidence samples → SE ≪ 1 mm |
-| Surface texture / non-flatness | σ shown per capture | Robust trim + MAD rejection; warning if σ > 8 mm or < 60% flat |
-| ARKit world-scale (VIO) error | ~0.3–0.5% of span (≈ 2–3 mm) | **Dominant term** → one-tap tape calibration knocks it to ~0.15% |
-| Out-of-parallel walls | real geometry | Angle shown; > 1.5° flagged on the row |
-| Tape-measure ground truth itself | ±1/32″ | Measure at the same spots the app sampled |
-
-Displayed ± is the standard error combined with the scale term, floored at 1/32″. Uncalibrated, expect ±1/8″; **after calibration, ±1/16″ is the honest claim** in good conditions — and the app says so on every row rather than pretending to more.
-
-**Validation protocol (demoable live):**
-1. Tape-measure the closet width/depth/height (ground truth, ±1/32″).
-2. Scan; record app values and the ARKit cross-check deltas (two independent detectors agreeing is method validation).
-3. Calibrate on one dimension (e.g. width), then check the *other* dimensions against tape — held-out validation, not fitting to the answer.
-4. Repeatability: reset, rescan 3–5×, compare spread to the displayed ±.
-5. Unit tests (`PlaneMathTests`, 8 tests) prove the math: synthetic walls with 4 mm noise recover a known 0.686 m gap to < 1 mm, and a box covering 25% of the window doesn't drag the plane.
-
-**Limitations (say them out loud):** world-scale error is the physical floor — 1/16″ over a closet span needs the calibration step; mirrors/glossy paint corrupt LiDAR (aim at a matte patch); walls out of plumb make "the" width location-dependent (we report the mean over the sampled patches + the angle); very dark closets need the torch for tracking.
-
-## 20-minute demo script
-
-1. **(2 min)** Problem framing: reach-in closet, cluttered, soffit, 1/16″ target — why edges/corners are the enemy and planes are the answer.
-2. **(6 min)** Live scan: six captures → closet goes visibly empty on screen with dimensions on the wall. Point out σ/point-count feedback and a deliberate capture over a cluttered patch (warning fires, recapture).
-3. **(3 min)** Door from outside: jambs + head chips → door width/height; note nothing else of the room was captured.
-4. **(5 min)** Accuracy: tape vs app table, calibrate on width, validate on depth/height; show ARKit cross-check deltas and the repeatability spread.
-5. **(4 min)** Architecture walkthrough (diagram above), why RoomPlan lost, limitations, Q&A.
-
-## Build
-
-Xcode project in `ClosetScanner/` — open, select your iPhone, Run (camera permission already configured). Tests: `xcodebuild -project ClosetScanner/ClosetScanner.xcodeproj -scheme ClosetScanner -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' test`.
+Source layout: `PlaneMath.swift` (geometry and formatting, no ARKit imports, unit-tested), `CaptureController.swift` (session, capture, measurements, rendering), `ScanView.swift` / `StartView.swift` (UI).
