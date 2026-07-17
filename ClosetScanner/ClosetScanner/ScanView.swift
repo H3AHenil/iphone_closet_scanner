@@ -17,8 +17,6 @@ struct ScanView: View {
     @State private var showResetConfirm = false
     @State private var showExitConfirm = false
     @State private var showViewer = false
-    @State private var calibrateTarget: Measurement?
-    @State private var calibrateText = ""
 
     init(hasSoffit: Bool, onExit: @escaping () -> Void) {
         _controller = StateObject(wrappedValue: CaptureController(hasSoffit: hasSoffit))
@@ -51,23 +49,6 @@ struct ScanView: View {
         .confirmationDialog("Leave the scan? Captures will be lost.", isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button("Leave", role: .destructive) { onExit() }
         }
-        .alert("Calibrate scale", isPresented: calibrateAlertBinding, presenting: calibrateTarget) { m in
-            TextField("True \(m.name.lowercased()) in inches, e.g. 27 3/16", text: $calibrateText)
-                .keyboardType(.numbersAndPunctuation)
-            Button("Apply") {
-                if let meters = parseInches(calibrateText) {
-                    controller.calibrate(m, trueMeters: meters)
-                }
-                calibrateText = ""
-            }
-            Button("Cancel", role: .cancel) { calibrateText = "" }
-        } message: { m in
-            Text("App measured \(inchString(m.meters)). Enter the tape-measured value to set a scale correction for all measurements.")
-        }
-    }
-
-    private var calibrateAlertBinding: Binding<Bool> {
-        Binding(get: { calibrateTarget != nil }, set: { if !$0 { calibrateTarget = nil } })
     }
 
     // MARK: Scrims (readability over the camera feed)
@@ -110,19 +91,9 @@ struct ScanView: View {
             Text(CaptureController.lidarAvailable ? controller.status : "This device has no LiDAR — scanning unavailable")
                 .font(.footnote.weight(.medium))
                 .multilineTextAlignment(.leading)
-            HStack(spacing: 6) {
-                Text(controller.stepText)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if controller.calibration != 1 {
-                    Text(String(format: "cal ×%.4f", controller.calibration))
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .contextMenu {
-                            Button("Reset calibration", role: .destructive) { controller.resetCalibration() }
-                        }
-                }
-            }
+            Text(controller.stepText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -188,9 +159,26 @@ struct ScanView: View {
     private func chip(_ label: SurfaceLabel) -> some View {
         let captured = controller.surfaces[label] != nil
         let isTarget = controller.target == label
+        // Forced capture order: the current step, the next uncaptured step
+        // (so a capture warning never strands the flow), and recaptures.
+        let isNext = label == controller.captureOrder.first { controller.surfaces[$0] == nil }
         return Button {
             controller.target = label
         } label: {
+            chipLabel(label, captured: captured, isTarget: isTarget)
+        }
+        .disabled(!captured && !isTarget && !isNext)
+        .opacity(captured || isTarget || isNext ? 1 : 0.45)
+        .contextMenu {
+            if captured {
+                Button("Recapture") { controller.target = label }
+                Button("Remove", role: .destructive) { controller.removeSurface(label) }
+            }
+        }
+        .foregroundStyle(.white)
+    }
+
+    private func chipLabel(_ label: SurfaceLabel, captured: Bool, isTarget: Bool) -> some View {
             HStack(spacing: 5) {
                 if captured {
                     Image(systemName: "checkmark.circle.fill")
@@ -205,14 +193,6 @@ struct ScanView: View {
             .padding(.vertical, 8)
             .background(isTarget ? AnyShapeStyle(label.color.opacity(0.92)) : AnyShapeStyle(.ultraThinMaterial),
                         in: Capsule())
-        }
-        .contextMenu {
-            if captured {
-                Button("Recapture") { controller.target = label }
-                Button("Remove", role: .destructive) { controller.removeSurface(label) }
-            }
-        }
-        .foregroundStyle(.white)
     }
 
     private var captureButton: some View {
@@ -265,8 +245,7 @@ struct ScanView: View {
             .padding(.top, 10)
             .padding(.bottom, 4)
             ForEach(controller.measurements) { m in
-                Button { calibrateTarget = m } label: { measurementRow(m) }
-                    .buttonStyle(.plain)
+                measurementRow(m)
                 if m.id != controller.measurements.last?.id {
                     Divider().padding(.leading, 14)
                 }
@@ -345,62 +324,88 @@ struct ShellViewer: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                RealityView { content in
-                    content.camera = .virtual
-                    if let entity = controller.viewerEntity() {
-                        content.add(entity)
-                    }
-                }
-                .realityViewCameraControls(.orbit)
-                summary
-            }
-            .background(
-                LinearGradient(colors: [Color(white: 0.16), Color(white: 0.04)],
-                               startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-            )
-            .navigationTitle("Empty Closet")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
+        VStack(spacing: 0) {
+            RealityView { content in
+                content.camera = .virtual
+                if let entity = controller.viewerEntity() {
+                    content.add(entity)
                 }
             }
-            .preferredColorScheme(.dark)
+            .realityViewCameraControls(.orbit)
+            panel
         }
+        .background(Color(white: 0.07).ignoresSafeArea())
+        .preferredColorScheme(.dark)
     }
 
-    private var summary: some View {
-        VStack(spacing: 6) {
-            if let line = mainLine {
-                Text(line)
-                    .font(.headline.monospacedDigit())
-            }
-            ForEach(extraMeasurements) { m in
-                Text("\(m.name): \(inchString(m.meters))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Text("Drag to orbit · pinch to zoom")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity)
-    }
-
-    private var mainLine: String? {
-        func value(_ name: String) -> String? {
-            controller.measurements.first { $0.name == name }.map { inchString($0.meters) }
-        }
-        guard let w = value("Width"), let d = value("Depth"), let h = value("Height") else { return nil }
-        return "\(w) W × \(d) D × \(h) H"
+    private func measurement(_ name: String) -> Measurement? {
+        controller.measurements.first { $0.name == name }
     }
 
     private var extraMeasurements: [Measurement] {
         controller.measurements.filter { !["Width", "Depth", "Height"].contains($0.name) }
+    }
+
+    private var panel: some View {
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(Color(white: 0.35))
+                .frame(width: 36, height: 5)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+
+            ForEach(["Width", "Depth", "Height"], id: \.self) { name in
+                if let m = measurement(name) { mainRow(m) }
+            }
+            ForEach(extraMeasurements) { m in smallRow(m) }
+
+            Button {
+                dismiss()
+            } label: {
+                Text("Rescan")
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(.blue, in: Capsule())
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 14)
+            .padding(.bottom, 26)
+        }
+        .background(Color(white: 0.14), in: UnevenRoundedRectangle(topLeadingRadius: 32, topTrailingRadius: 32))
+        .padding(.horizontal, 6)
+    }
+
+    private func mainRow(_ m: Measurement) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(m.name)
+                .font(.title3)
+                .foregroundStyle(Color(white: 0.62))
+            Spacer()
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(feetInchString(m.meters))
+                    .font(.title.weight(.bold))
+                Text("\(String(format: "%.2f", m.meters / 0.0254)) in · \(cmString(m.meters))")
+                    .font(.subheadline)
+                    .foregroundStyle(Color(white: 0.55))
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 10)
+    }
+
+    private func smallRow(_ m: Measurement) -> some View {
+        HStack {
+            Text(m.name)
+                .foregroundStyle(Color(white: 0.62))
+            Spacer()
+            Text(feetInchString(m.meters))
+                .fontWeight(.semibold)
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 5)
     }
 }
 

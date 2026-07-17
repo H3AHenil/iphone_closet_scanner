@@ -109,8 +109,8 @@ struct StartView: View {
 
     private var orderCaption: String {
         switch hasSoffit {
-        case true: "Capture order: soffit → door → interior"
-        case false: "Capture order: door → interior"
+        case true: "Capture order: soffit → interior → door"
+        case false: "Capture order: interior → door"
         default: "Answer above to begin"
         }
     }

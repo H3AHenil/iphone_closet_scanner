@@ -19,6 +19,8 @@ enum SurfaceLabel: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// User-captured interior surfaces, in capture order. The back wall comes
+    /// before the front wall so the front capture can be checked against it.
     static let coreOrder: [SurfaceLabel] = [.leftWall, .rightWall, .backWall, .frontWall, .floor, .ceiling]
 
     var title: String {
@@ -33,7 +35,7 @@ enum SurfaceLabel: String, CaseIterable, Identifiable {
         case .soffitFace: "Soffit face"
         case .doorLeftJamb: "Door jamb L"
         case .doorRightJamb: "Door jamb R"
-        case .doorHead: "Door head"
+        case .doorHead: "Above door"
         }
     }
 
@@ -49,29 +51,31 @@ enum SurfaceLabel: String, CaseIterable, Identifiable {
         case .soffitFace: "Soffit face"
         case .doorLeftJamb: "Jamb L"
         case .doorRightJamb: "Jamb R"
-        case .doorHead: "Door head"
+        case .doorHead: "Above door"
         }
     }
 
     var hint: String {
         switch self {
-        case .frontWall: "Aim at the inside face of the front wall, beside or above the opening"
+        case .frontWall: "Aim across at the inside face of the front wall, beside the opening"
         case .soffitBottom: "Aim up at the underside of the soffit"
         case .soffitFace: "Aim at the soffit's vertical face (the side facing the back wall)"
-        case .doorLeftJamb: "From outside, aim at the left door jamb face"
-        case .doorRightJamb: "From outside, aim at the right door jamb face"
-        case .doorHead: "Aim up at the underside of the door head"
+        case .doorLeftJamb: "From outside, aim at the inner LEFT wall of the door opening (the reveal)"
+        case .doorRightJamb: "From outside, aim at the inner RIGHT wall of the door opening (the reveal)"
+        case .doorHead: "From INSIDE the closet, frame the top edge of the opening — half wall above, half opening"
         default: "Aim the frame at a bare patch of the \(title.lowercased()), then Capture"
         }
     }
 
     /// Fraction of the depth map used as the sampling window. Big flat
-    /// surfaces get a wide window; narrow jambs/returns get a tight one.
+    /// surfaces get a wide window; narrow jamb reveals a tight one; the
+    /// above-door edge capture needs room for wall AND opening.
     var windowFraction: Double {
         switch self {
         case .leftWall, .rightWall, .backWall, .floor, .ceiling: 0.42
         case .frontWall, .soffitBottom, .soffitFace: 0.20
-        case .doorLeftJamb, .doorRightJamb, .doorHead: 0.11
+        case .doorLeftJamb, .doorRightJamb: 0.14
+        case .doorHead: 0.30
         }
     }
 
@@ -85,16 +89,19 @@ enum SurfaceLabel: String, CaseIterable, Identifiable {
     var phase: String {
         switch self {
         case .soffitBottom, .soffitFace: "Soffit"
-        case .doorLeftJamb, .doorRightJamb, .doorHead: "Door · from outside"
+        case .doorLeftJamb, .doorRightJamb: "Door · from outside"
+        case .doorHead: "Door · from inside"
         default: "Closet interior"
         }
     }
 
-    /// Capture sequence: soffit (if any) → door from outside → interior.
+    /// Capture sequence: soffit (if any) → interior → door last. The door
+    /// captures need the earlier planes: jamb orientation is checked against
+    /// the back wall, and the head capture clips its rays to the opening.
     static func captureOrder(hasSoffit: Bool) -> [SurfaceLabel] {
         (hasSoffit ? [.soffitBottom, .soffitFace] : [])
-            + [.doorLeftJamb, .doorRightJamb, .doorHead]
             + coreOrder
+            + [.doorLeftJamb, .doorRightJamb, .doorHead]
     }
 }
 
@@ -224,6 +231,38 @@ func planeGap(_ a: PlaneFit, _ b: PlaneFit) -> GapResult {
                      angleDegrees: angle)
 }
 
+// MARK: - Edge captures (door)
+
+/// Where the ray from `origin` through `p` crosses a plane. Nil if parallel
+/// or the crossing is behind the origin.
+func rayPlaneCrossing(origin: SIMD3<Double>, through p: SIMD3<Double>,
+                      planeNormal n: SIMD3<Double>, planePoint c: SIMD3<Double>) -> SIMD3<Double>? {
+    let dir = p - origin
+    let denom = simd_dot(dir, n)
+    guard abs(denom) > 1e-9 else { return nil }
+    let t = simd_dot(c - origin, n) / denom
+    guard t > 0 else { return nil }
+    return origin + dir * t
+}
+
+/// Rays that pass through the door opening cross the wall plane below the
+/// head; their crossings fill the opening up to a sharp cutoff at the head
+/// line. Returns a horizontal plane at that height (99th percentile, robust
+/// to stray flying pixels) whose samples are the edge points.
+func headLineFit(crossings: [SIMD3<Double>]) -> PlaneFit? {
+    guard crossings.count >= 150 else { return nil }
+    let ys = crossings.map(\.y).sorted()
+    let y = ys[Int(Double(ys.count) * 0.99)]
+    let edge = crossings.filter { $0.y > y - 0.008 && $0.y <= y + 0.002 }
+    guard edge.count >= 20 else { return nil }
+    var centroid = edge.reduce(SIMD3<Double>(), +) / Double(edge.count)
+    centroid.y = y
+    // Samples flattened to the head height so plane-gap stats stay exact.
+    let flat = edge.map { SIMD3($0.x, y, $0.z) }
+    return PlaneFit(normal: SIMD3(0, 1, 0), centroid: centroid, sigma: 0.004,
+                    inlierFraction: 1, count: edge.count, samples: flat)
+}
+
 /// Corner point where three planes meet.
 func planeIntersection(_ p1: PlaneFit, _ p2: PlaneFit, _ p3: PlaneFit) -> SIMD3<Double>? {
     let m = simd_double3x3(rows: [p1.normal, p2.normal, p3.normal])
@@ -273,23 +312,16 @@ func cmString(_ meters: Double) -> String {
     String(format: "%.1f cm", meters * 100)
 }
 
-/// Parses "27 3/16", "27.1875", "3/16", or "27" (inches) → meters.
-func parseInches(_ s: String) -> Double? {
-    let cleaned = s.replacingOccurrences(of: "″", with: "")
-        .replacingOccurrences(of: "\"", with: "")
-        .trimmingCharacters(in: .whitespaces)
-    guard !cleaned.isEmpty else { return nil }
-    var inches = 0.0
-    for part in cleaned.split(separator: " ") {
-        if part.contains("/") {
-            let f = part.split(separator: "/")
-            guard f.count == 2, let n = Double(f[0]), let d = Double(f[1]), d > 0 else { return nil }
-            inches += n / d
-        } else if let x = Double(part) {
-            inches += x
-        } else {
-            return nil
-        }
-    }
-    return inches > 0 ? inches * 0.0254 : nil
+/// Meters → feet + inches to the nearest 1/16″, e.g. "8′ 4 1/16″".
+func feetInchString(_ meters: Double) -> String {
+    let total = Int((meters / 0.0254 * 16).rounded())
+    let feet = total / (16 * 12)
+    let rem = total % (16 * 12)
+    if rem == 0 { return feet > 0 ? "\(feet)′" : "0″" }
+    let whole = rem / 16
+    let frac = rem % 16
+    let inches: String = if frac == 0 { "\(whole)″" }
+        else if whole > 0 { "\(whole) \(sixteenthsString(frac))″" }
+        else { "\(sixteenthsString(frac))″" }
+    return feet > 0 ? "\(feet)′ \(inches)" : inches
 }

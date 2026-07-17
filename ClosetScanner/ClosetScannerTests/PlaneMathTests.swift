@@ -39,12 +39,12 @@ struct PlaneMathTests {
     @Test func captureOrderReflectsSoffitChoice() {
         #expect(SurfaceLabel.captureOrder(hasSoffit: true) == [
             .soffitBottom, .soffitFace,
-            .doorLeftJamb, .doorRightJamb, .doorHead,
             .leftWall, .rightWall, .backWall, .frontWall, .floor, .ceiling,
+            .doorLeftJamb, .doorRightJamb, .doorHead,
         ])
         #expect(SurfaceLabel.captureOrder(hasSoffit: false) == [
-            .doorLeftJamb, .doorRightJamb, .doorHead,
             .leftWall, .rightWall, .backWall, .frontWall, .floor, .ceiling,
+            .doorLeftJamb, .doorRightJamb, .doorHead,
         ])
     }
 
@@ -105,6 +105,37 @@ struct PlaneMathTests {
         #expect(planeIntersection(a, b, c) == nil)
     }
 
+    @Test func rayCrossingHitsPlane() {
+        let x = rayPlaneCrossing(origin: SIMD3(0, 0, 2), through: SIMD3(0, 1, -1),
+                                 planeNormal: SIMD3(0, 0, 1), planePoint: .zero)
+        #expect(x != nil)
+        #expect(simd_length(x! - SIMD3(0, 2.0 / 3, 0)) < 1e-9)
+        // Crossing behind the origin is rejected.
+        #expect(rayPlaneCrossing(origin: SIMD3(0, 0, 2), through: SIMD3(0, 0, 3),
+                                 planeNormal: SIMD3(0, 0, 1), planePoint: .zero) == nil)
+    }
+
+    @Test func headLineFindsTopOfOpening() {
+        // Through-the-opening crossings fill the wall plane up to the head at y = 2.03.
+        var rng = LCG(state: 5)
+        let crossings = (0..<3000).map { _ in
+            SIMD3(Double.random(in: -0.4...0.4, using: &rng),
+                  Double.random(in: 1.5...2.03, using: &rng), 0.0)
+        }
+        let fit = headLineFit(crossings: crossings)
+        #expect(fit != nil)
+        #expect(abs(fit!.centroid.y - 2.03) < 0.008)
+        #expect(fit!.normal.y == 1)
+        #expect(fit!.samples.allSatisfy { $0.y == fit!.centroid.y })
+    }
+
+    @Test func feetInchFormatting() {
+        #expect(feetInchString(100.0625 * 0.0254) == "8′ 4 1/16″")
+        #expect(feetInchString(27.875 * 0.0254) == "2′ 3 7/8″")
+        #expect(feetInchString(11.5 * 0.0254) == "11 1/2″")
+        #expect(feetInchString(24 * 0.0254) == "2′")
+    }
+
     @Test func inchFormatting() {
         #expect(inchString(27.1875 * 0.0254) == "27 3/16″")
         #expect(inchString(27.5 * 0.0254) == "27 1/2″")
@@ -112,11 +143,4 @@ struct PlaneMathTests {
         #expect(inchString(0.1875 * 0.0254) == "3/16″")
     }
 
-    @Test func inchParsing() {
-        #expect(abs(parseInches("27 3/16")! - 27.1875 * 0.0254) < 1e-9)
-        #expect(abs(parseInches("27.1875")! - 27.1875 * 0.0254) < 1e-9)
-        #expect(abs(parseInches("3/16")! - 0.1875 * 0.0254) < 1e-9)
-        #expect(parseInches("abc") == nil)
-        #expect(parseInches("") == nil)
-    }
 }
